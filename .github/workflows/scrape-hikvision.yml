@@ -1,0 +1,27 @@
+name: Scrape Hikvision cameras
+
+on:
+  workflow_dispatch:
+    inputs:
+      verify:
+        description: "Check scraped data against the known-good expected values"
+        type: boolean
+        default: true
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Run scraper
+        run: |
+          if [ "${{ inputs.verify }}" = "true" ]; then
+            python3 scrape_hikvision_cameras.py --verify
+          else
+            python3 scrape_hikvision_cameras.py
+          fi
