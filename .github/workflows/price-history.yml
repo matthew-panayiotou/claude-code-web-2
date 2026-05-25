@@ -2,7 +2,7 @@ name: Price history
 
 on:
   schedule:
-    - cron: "0 */12 * * *"   # every 12 hours (00:00 and 12:00 UTC)
+    - cron: "17 1,13 * * *"  # every 12 hours, offset off the hour (01:17 and 13:17 UTC) to avoid GitHub's top-of-hour scheduling congestion
   workflow_dispatch:
 
 permissions:
