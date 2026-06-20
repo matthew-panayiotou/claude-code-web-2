@@ -27,7 +27,7 @@ URL = (
 # Page prices exclude VAT; VAT-inclusive price is computed at this rate.
 VAT_RATE = Decimal("0.19")
 
-EXPECTED_PRODUCT_COUNT = 3
+EXPECTED_PRODUCT_COUNT = 4
 
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
