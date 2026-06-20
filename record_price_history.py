@@ -60,11 +60,17 @@ def append_rows(products: list[dict]) -> None:
             )
 
 
+def column_label(name: str) -> str:
+    # Drop the redundant 'Hikvision | ' prefix and replace inner '|' separators,
+    # which would otherwise break the markdown table.
+    return name.removeprefix("Hikvision | ").replace(" | ", " · ")
+
+
 def render_markdown() -> str:
     with open(CSV_PATH, newline="", encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
 
-    models = sorted({row["model"] for row in rows})
+    names = sorted({row["name"] for row in rows})
 
     by_time: dict[str, dict[str, str]] = {}
     for row in rows:
@@ -72,7 +78,7 @@ def render_markdown() -> str:
             f"{row['price_before_discount']} / {row['price_after_discount']} / "
             f"{row['price_with_vat']} / {avail_code(row['availability'])}"
         )
-        by_time.setdefault(row["scraped_at"], {})[row["model"]] = cell
+        by_time.setdefault(row["scraped_at"], {})[row["name"]] = cell
 
     lines = [
         "# Hikvision DS-2CD2087G3 price history",
@@ -83,11 +89,11 @@ def render_markdown() -> str:
         "",
         "**Availability:** `A` = in stock, `O` = out of stock.",
         "",
-        "| Scraped (UTC) | " + " | ".join(models) + " |",
-        "| --- | " + " | ".join(["---"] * len(models)) + " |",
+        "| Scraped (UTC) | " + " | ".join(column_label(n) for n in names) + " |",
+        "| --- | " + " | ".join(["---"] * len(names)) + " |",
     ]
     for scraped_at in sorted(by_time):
-        cells = [by_time[scraped_at].get(model, "") for model in models]
+        cells = [by_time[scraped_at].get(name, "") for name in names]
         lines.append(f"| {scraped_at} | " + " | ".join(cells) + " |")
     return "\n".join(lines) + "\n"
 
