@@ -25,11 +25,16 @@ jobs:
       - name: Record prices
         run: python3 record_price_history.py
 
+      # Must run after record_price_history.py: that script rewrites
+      # price_history.md wholesale, and this one appends the Synology section back.
+      - name: Record Synology DVA1622 prices
+        run: python3 record_synology_price_history.py
+
       - name: Commit updated history
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add data/price_history.csv data/price_history.md
+          git add data/price_history.csv data/price_history.md data/synology_price_history.csv
           if git diff --cached --quiet; then
             echo "No changes to commit"
           else
