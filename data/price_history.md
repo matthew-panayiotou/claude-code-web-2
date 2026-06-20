@@ -61,13 +61,4 @@ Each cell shows **price before discount / price after discount / price incl. VAT
 | 2026-06-18T16:43:15Z | 408.76 / 306.57 / 364.82 / A |  | 408.76 / 306.57 / 364.82 / A | 405.09 / 303.82 / 361.55 / O |
 | 2026-06-19T06:30:23Z | 408.76 / 306.57 / 364.82 / A |  | 408.76 / 306.57 / 364.82 / A | 405.09 / 303.82 / 361.55 / O |
 | 2026-06-20T19:44:39Z | 408.76 / 306.57 / 364.82 / A | 408.76 / 306.57 / 364.82 / A | 408.76 / 306.57 / 364.82 / A | 405.09 / 303.82 / 361.55 / O |
-
-<!-- SYNOLOGY-DVA1622:START -->
-# Synology DVA1622 price history
-
-Cheapest **new** listing per site. Each cell shows **item price / delivery to Cyprus / total** in EUR. Both sites quote in EUR; a non-EUR listed price would be shown in parentheses, and the EUR figures use the exchange rate recorded at scrape time (see the CSV). One row per scrape; timestamps in UTC.
-
-| Scraped (UTC) | amazon.de | skroutz.cy |
-| --- | --- | --- |
-| 2026-06-20T21:08:55Z | 961.82 / 0.0 / 961.82 | 1240.98 / 0.0 / 1240.98 |
-<!-- SYNOLOGY-DVA1622:END -->
+| 2026-06-20T21:18:32Z | 408.76 / 306.57 / 364.82 / A | 408.76 / 306.57 / 364.82 / A | 408.76 / 306.57 / 364.82 / A | 405.09 / 303.82 / 361.55 / O |
