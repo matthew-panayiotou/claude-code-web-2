@@ -27,10 +27,15 @@ jobs:
 
       # Must run after record_price_history.py: that script rewrites
       # price_history.md wholesale, and this one appends the Synology section back.
+      # always(): a camera-scrape failure must not stop the Synology append.
       - name: Record Synology DVA1622 prices
+        if: always()
         run: python3 record_synology_price_history.py
 
+      # always(): commit whatever either recorder produced, even if one failed,
+      # so a transient block on one product never withholds the other's data.
       - name: Commit updated history
+        if: always()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
