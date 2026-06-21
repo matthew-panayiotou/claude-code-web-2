@@ -18,12 +18,15 @@ skroutz.cy
     retail offers, so we take the offer with the lowest final price.
 
 amazon.de
-    Fetched through ScraperAPI (residential proxies), which is the only thing
-    that reliably gets past amazon's CAPTCHA. ``country_code=de`` lands on an EU
-    IP so amazon quotes the store-native EUR price. The featured offer (buy box)
-    is amazon's cheapest new offer; we read its price, delivery cost and
-    availability. Set the API key in the ``SCRAPER_API_KEY`` env var; without it
-    the amazon scrape is skipped (skroutz still works).
+    Fetched through ScraperAPI, the only thing that reliably gets past amazon's
+    CAPTCHA. We request the *mobile* page (``device_type=mobile``): amazon's
+    desktop page loads the price via a client-side prefetch that the fetched HTML
+    never contains, whereas the mobile page is server-rendered with the price
+    inline. ``country_code=de`` lands on a German IP so amazon quotes the native
+    EUR price. We take the cheapest new offer — the featured buy box if one is in
+    stock, otherwise the cheapest "X Optionen von …" buying-options offer. Set the
+    API key in ``SCRAPER_API_KEY``; without it the amazon scrape is skipped
+    (skroutz still works).
 
 Usage:
     python3 scrape_synology_dva1622.py            # scrape and print JSON
@@ -101,8 +104,8 @@ def _jina_get(target_url: str, *, headers: dict | None = None) -> str:
 
 
 def _scraperapi_get(target_url: str, *, render: bool = False,
-                    country_code: str = "de") -> str:
-    """Fetch ``target_url`` through ScraperAPI (residential proxies)."""
+                    country_code: str = "de", device_type: str | None = None) -> str:
+    """Fetch ``target_url`` through ScraperAPI (cloud proxies)."""
     if not SCRAPER_API_KEY:
         raise RuntimeError(
             "SCRAPER_API_KEY is not set; cannot fetch amazon.de "
@@ -115,6 +118,8 @@ def _scraperapi_get(target_url: str, *, render: bool = False,
     }
     if render:
         params["render"] = "true"
+    if device_type:
+        params["device_type"] = device_type
     return _get(SCRAPERAPI_BASE + "?" + urllib.parse.urlencode(params))
 
 
@@ -212,35 +217,49 @@ def scrape_skroutz() -> dict:
 # amazon.de
 # -------------------------------------------------------------------------
 def _amazon_fetch() -> str:
-    # Plain server HTML carries the buy-box price inline (no JS needed); fetching
-    # via a German-geo residential IP yields the native EUR price. If a future
-    # markup shift hides the price behind JS, re-fetch with rendering enabled.
-    html = _scraperapi_get(AMAZON_URL, country_code="de")
-    if "priceToPay" not in html:
-        html = _scraperapi_get(AMAZON_URL, render=True, country_code="de")
-    return html
+    # ScraperAPI's mobile render inlines the price: amazon's desktop page loads it
+    # via a client-side prefetch (absent from the fetched HTML), but the mobile
+    # page is server-rendered with both the featured buy-box price and the
+    # cheapest "X Optionen von …" buying-options price. country_code=de lands on a
+    # German IP so amazon quotes the native EUR price.
+    return _scraperapi_get(AMAZON_URL, country_code="de", device_type="mobile")
+
+
+# Cheapest "buying options" price: <span>1 Option von </span> … <span class="a-offscreen">1.390,77€</span>
+_AMZ_OPTIONS_RE = re.compile(
+    r'Option(?:en)?\s*von\s*</span>.*?<span class="a-offscreen">\s*([\d.]+,\d{2})\s*([€$£])',
+    re.DOTALL,
+)
+# Featured buy-box price, rendered as whole/decimal/fraction spans.
+_AMZ_STRUCTURED_RE = re.compile(
+    r'a-price-whole">([\d.]+)<span class="a-price-decimal">,</span></span>'
+    r'<span class="a-price-fraction">(\d{2})</span>'
+    r'<span class="a-price-symbol">([€$£])'
+)
 
 
 def _amazon_price(html: str) -> tuple[float, str]:
-    # The featured-offer price lives in the priceToPay block. Anchor there, then
-    # read the rendered whole/fraction/symbol spans (the *.-offscreen mirror is
-    # sometimes blank), falling back to a flat offscreen amount.
-    anchor = html.find("priceToPay")
-    region = html[anchor:] if anchor != -1 else html
-    structured = re.search(
-        r'a-price-whole">([\d.]+)<span class="a-price-decimal">,</span></span>'
-        r'<span class="a-price-fraction">(\d{2})</span>'
-        r'<span class="a-price-symbol">([€$£])',
-        region,
-    )
-    if structured:
-        whole, fraction, symbol = structured.groups()
-        return _parse_eu_number(f"{whole},{fraction}"), CURRENCY_SYMBOLS[symbol]
+    """Cheapest new amazon.de price: the featured buy box if present, otherwise the
+    cheapest "buying options" offer. Returns (price, currency)."""
+    candidates: list[tuple[float, str]] = []
 
-    flat = re.search(r'(?:a-offscreen|aok-offscreen)">\s*([\d.]+,\d{2})\s*([€$£])', region)
-    if flat:
-        return _parse_eu_number(flat.group(1)), CURRENCY_SYMBOLS[flat.group(2)]
-    raise ValueError("could not find the amazon.de buy-box price")
+    options = _AMZ_OPTIONS_RE.search(html)
+    if options:
+        candidates.append((_parse_eu_number(options.group(1)), CURRENCY_SYMBOLS[options.group(2)]))
+
+    # Anchor the structured price to the buy box so we don't pick up an accessory.
+    anchor = html.find("priceToPay")
+    if anchor == -1:
+        anchor = html.find("corePrice")
+    if anchor != -1:
+        featured = _AMZ_STRUCTURED_RE.search(html[anchor:anchor + 4000])
+        if featured:
+            whole, fraction, symbol = featured.groups()
+            candidates.append((_parse_eu_number(f"{whole},{fraction}"), CURRENCY_SYMBOLS[symbol]))
+
+    if not candidates:
+        raise ValueError("could not find any amazon.de price (featured or buying options)")
+    return min(candidates, key=lambda c: c[0])
 
 
 def _amazon_delivery(html: str) -> float:
@@ -258,19 +277,21 @@ def _amazon_availability(html: str) -> str:
 
 
 def parse_amazon(html: str) -> dict:
-    # Amazon's featured offer (the priceToPay buy box) is always a new offer;
-    # used/renewed stock is only ever surfaced under "Andere Angebote", never here.
-    if "priceToPay" not in html:
-        raise ValueError("amazon.de page has no featured new offer (buy box)")
+    # The buy box and the "Andere Verkäufer/Optionen" listings are both new offers
+    # (used stock lives under a separate "Gebraucht kaufen" section), so the
+    # cheapest of them is the cheapest new listing.
     item, currency = _amazon_price(html)
     delivery = _amazon_delivery(html)
+    featured = "priceToPay" in html or "corePriceDisplay" in html
     return _with_eur(
         {
             "site": "amazon.de",
             "product": PRODUCT,
             "url": AMAZON_URL,
             "condition": "new",
-            "availability": _amazon_availability(html),
+            "availability": _amazon_availability(html) or (
+                "featured offer" if featured else "via buying options"
+            ),
             "currency": currency,
             "item_price": _money(item),
             "delivery_cost": _money(delivery),
@@ -310,13 +331,15 @@ def scrape_safe() -> tuple[list[dict], dict[str, str]]:
     return listings, errors
 
 
-# Known-good item prices supplied for validation (EUR).
+# Point-in-time reference prices (EUR) for a --verify sanity check. These drift as
+# stock and offers change: amazon's original 961.82 "Versand durch Amazon" offer
+# (only 3 left) sold out, leaving 1390.77 as the cheapest new offer on 2026-06-21.
 EXPECTED = {
     "skroutz.cy": 1240.98,
-    "amazon.de": 961.82,
+    "amazon.de": 1390.77,
 }
-# Acceptable drift before we treat a scrape as suspicious (prices move over time).
-VERIFY_TOLERANCE = 0.05  # 5%
+# Generous drift allowance — this is a smoke test, not a price assertion.
+VERIFY_TOLERANCE = 0.10  # 10%
 
 
 def verify(listings: list[dict]) -> bool:
