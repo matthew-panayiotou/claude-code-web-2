@@ -7,22 +7,23 @@ currency and an EUR conversion with the exchange rate at scrape time" requiremen
 the scraper detects the listed currency, looks up the live EUR rate (identity for
 EUR) and stores the converted figures alongside the originals.
 
-Both sites sit behind bot protection that rejects Python's urllib TLS handshake
-(403/503), so we shell out to ``curl`` (HTTP/2 + brotli), which they accept.
+Both sites block direct requests from data-center/CI IP ranges (skroutz returns a
+403 challenge, amazon a CAPTCHA), so we never hit them directly. Instead each
+site is fetched through a proxy that fetches from its own clean IPs:
 
 skroutz.cy
-    The SKU page exposes a clean ``filter_products.json`` endpoint listing every
-    shop offer with ``raw_price``/``shipping_cost``/``final_price``. skroutz only
-    aggregates new retail offers, so we simply take the offer with the lowest
-    final price.
+    Fetched through the free, no-key r.jina.ai reader. The SKU page exposes a
+    clean ``filter_products.json`` endpoint listing every shop offer with
+    ``raw_price``/``shipping_cost``/``final_price``. skroutz only aggregates new
+    retail offers, so we take the offer with the lowest final price.
 
 amazon.de
-    amazon.de defaults to a USD price overlay; we force EUR with the
-    ``i18n-prefs=EUR`` cookie so the listed currency is the store-native EUR.
-    The featured offer (buy box) is Amazon's cheapest new offer; we read its
-    price, delivery cost and availability. Product pages are served
-    intermittently from data-center IPs, so the fetch retries until a full page
-    (not a CAPTCHA stub) comes back.
+    Fetched through ScraperAPI (residential proxies), which is the only thing
+    that reliably gets past amazon's CAPTCHA. ``country_code=de`` lands on an EU
+    IP so amazon quotes the store-native EUR price. The featured offer (buy box)
+    is amazon's cheapest new offer; we read its price, delivery cost and
+    availability. Set the API key in the ``SCRAPER_API_KEY`` env var; without it
+    the amazon scrape is skipped (skroutz still works).
 
 Usage:
     python3 scrape_synology_dva1622.py            # scrape and print JSON
@@ -32,10 +33,12 @@ Usage:
 import argparse
 import html as htmllib
 import json
+import os
 import re
 import subprocess
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -55,48 +58,73 @@ AMAZON_URL = f"https://www.amazon.de/dp/{AMAZON_ASIN}"
 # Live EUR FX rates (frankfurter.dev — ECB reference rates, no API key needed).
 FX_URL = "https://api.frankfurter.dev/v1/latest?base={base}&symbols=EUR"
 
-DESKTOP_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-)
-
-# A real amazon.de product page is hundreds of KB; CAPTCHA / "503" stubs are ~1KB.
-# amazon throttles per-IP, so we make a modest number of *spaced* attempts rather
-# than hammering (rapid retries only deepen the block).
-AMAZON_MIN_BYTES = 80_000
-AMAZON_MAX_TRIES = 12
-AMAZON_RETRY_DELAY = 4.0  # seconds between attempts
+# Proxy transports (the sites block CI IPs directly, so we route through these).
+JINA_BASE = "https://r.jina.ai/"
+SCRAPERAPI_BASE = "https://api.scraperapi.com/"
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
 
 CURRENCY_SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP"}
 
-
 _STATUS_SEP = b"\n__HTTP_STATUS__:"
+_DEFAULT_TIMEOUT = 90
 
 
-def _curl_once(url: str, headers: dict | None) -> tuple[int, bytes]:
-    args = ["curl", "-s", "--http2", "--compressed", "-A", DESKTOP_UA,
+def _curl_once(url: str, headers: dict | None, timeout: int) -> tuple[int, str]:
+    args = ["curl", "-s", "--compressed", "-m", str(timeout),
             "-w", _STATUS_SEP.decode() + "%{http_code}"]
     for key, value in (headers or {}).items():
         args += ["-H", f"{key}: {value}"]
     args.append(url)
-    result = subprocess.run(args, capture_output=True, timeout=60)
+    result = subprocess.run(args, capture_output=True, timeout=timeout + 15)
     if result.returncode != 0:
         raise RuntimeError(f"curl failed for {url}: {result.stderr.decode('utf-8', 'replace')}")
     body, _, status = result.stdout.rpartition(_STATUS_SEP)
-    return int(status or 0), body
+    return int(status or 0), body.decode("utf-8", "replace")
 
 
-def _curl(url: str, *, headers: dict | None = None, retries: int = 6) -> bytes:
-    """Fetch a URL, retrying past the sites' intermittent anti-bot 403/503 stubs."""
-    last = b""
+def _get(url: str, *, headers: dict | None = None, retries: int = 4,
+         timeout: int = _DEFAULT_TIMEOUT) -> str:
+    """GET ``url`` with retries, returning the body text. Raises on persistent failure."""
+    status = 0
     for attempt in range(retries):
-        status, body = _curl_once(url, headers)
+        status, body = _curl_once(url, headers, timeout)
         if status == 200 and body:
             return body
-        last = body
         if attempt < retries - 1:
-            time.sleep(1.5)
-    raise RuntimeError(f"could not fetch {url} (last status {status}, {len(last)} bytes)")
+            time.sleep(2.0 * (attempt + 1))
+    raise RuntimeError(f"could not fetch {url} (last status {status})")
+
+
+def _jina_get(target_url: str, *, headers: dict | None = None) -> str:
+    """Fetch ``target_url`` through the r.jina.ai reader (free, no key)."""
+    return _get(JINA_BASE + target_url, headers=headers)
+
+
+def _scraperapi_get(target_url: str, *, render: bool = False,
+                    country_code: str = "de") -> str:
+    """Fetch ``target_url`` through ScraperAPI (residential proxies)."""
+    if not SCRAPER_API_KEY:
+        raise RuntimeError(
+            "SCRAPER_API_KEY is not set; cannot fetch amazon.de "
+            "(set it as a GitHub Actions secret / env var)"
+        )
+    params = {
+        "api_key": SCRAPER_API_KEY,
+        "url": target_url,
+        "country_code": country_code,
+    }
+    if render:
+        params["render"] = "true"
+    return _get(SCRAPERAPI_BASE + "?" + urllib.parse.urlencode(params))
+
+
+def _extract_json(text: str) -> dict:
+    """Pull the first JSON object out of a (possibly proxy-wrapped) response body."""
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("no JSON object found in response")
+    obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    return obj
 
 
 def _money(value) -> float:
@@ -120,7 +148,7 @@ def eur_rate(currency: str) -> tuple[float, str, str]:
     """
     if currency == "EUR":
         return 1.0, datetime.now(timezone.utc).strftime("%Y-%m-%d"), "identity"
-    data = json.loads(_curl(FX_URL.format(base=currency)))
+    data = json.loads(_get(FX_URL.format(base=currency)))
     return float(data["rates"]["EUR"]), data["date"], "frankfurter.dev (ECB)"
 
 
@@ -140,10 +168,10 @@ def _with_eur(listing: dict) -> dict:
 # -------------------------------------------------------------------------
 def _skroutz_sku() -> str:
     try:
-        search = _curl(SKROUTZ_SEARCH, headers={"Accept-Language": "el-GR,el;q=0.9,en;q=0.8"})
-        match = re.search(rb"/s/(\d+)/[^\"]*\.html", search)
+        search = _jina_get(SKROUTZ_SEARCH)
+        match = re.search(r"/s/(\d+)/[A-Za-z0-9\-]*\.html", search)
         if match:
-            return match.group(1).decode()
+            return match.group(1)
     except Exception:
         pass
     return SKROUTZ_FALLBACK_SKU
@@ -152,16 +180,7 @@ def _skroutz_sku() -> str:
 def scrape_skroutz() -> dict:
     sku = _skroutz_sku()
     url = f"{SKROUTZ_BASE}/s/{sku}/filter_products.json"
-    data = json.loads(
-        _curl(
-            url,
-            headers={
-                "Accept": "application/json",
-                "X-Requested-With": "XMLHttpRequest",
-                "Accept-Language": "el-GR,el;q=0.9",
-            },
-        )
-    )
+    data = _extract_json(_jina_get(url))
     cards = data.get("product_cards", {})
     if not cards:
         raise ValueError("skroutz returned no offers for the DVA1622")
@@ -193,23 +212,13 @@ def scrape_skroutz() -> dict:
 # amazon.de
 # -------------------------------------------------------------------------
 def _amazon_fetch() -> str:
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-        # Force EUR (the store-native currency) instead of the USD price overlay.
-        "Cookie": "i18n-prefs=EUR; lc-acbde=de_DE",
-    }
-    for attempt in range(AMAZON_MAX_TRIES):
-        status, body = _curl_once(AMAZON_URL, headers)
-        # Amazon serves a ~1KB CAPTCHA/503 stub (sometimes with a 200) from
-        # data-center IPs; a genuine product page is hundreds of KB.
-        if status == 200 and len(body) >= AMAZON_MIN_BYTES:
-            return body.decode("utf-8", "replace")
-        if attempt < AMAZON_MAX_TRIES - 1:
-            time.sleep(AMAZON_RETRY_DELAY)
-    raise RuntimeError(
-        f"amazon.de kept returning anti-bot stubs after {AMAZON_MAX_TRIES} tries"
-    )
+    # Plain server HTML carries the buy-box price inline (no JS needed); fetching
+    # via a German-geo residential IP yields the native EUR price. If a future
+    # markup shift hides the price behind JS, re-fetch with rendering enabled.
+    html = _scraperapi_get(AMAZON_URL, country_code="de")
+    if "priceToPay" not in html:
+        html = _scraperapi_get(AMAZON_URL, render=True, country_code="de")
+    return html
 
 
 def _amazon_price(html: str) -> tuple[float, str]:

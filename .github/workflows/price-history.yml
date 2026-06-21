@@ -30,6 +30,11 @@ jobs:
       # always(): a camera-scrape failure must not stop the Synology append.
       - name: Record Synology DVA1622 prices
         if: always()
+        env:
+          # ScraperAPI key (residential proxies) used for amazon.de; skroutz.cy
+          # is fetched for free via r.jina.ai. Without the secret, amazon is
+          # skipped and only skroutz is recorded.
+          SCRAPER_API_KEY: ${{ secrets.SCRAPER_API_KEY }}
         run: python3 record_synology_price_history.py
 
       # always(): commit whatever either recorder produced, even if one failed,
