@@ -85,16 +85,20 @@ def _curl_once(url: str, headers: dict | None, timeout: int) -> tuple[int, str]:
     return int(status or 0), body.decode("utf-8", "replace")
 
 
-def _get(url: str, *, headers: dict | None = None, retries: int = 4,
+def _get(url: str, *, headers: dict | None = None, retries: int = 6,
          timeout: int = _DEFAULT_TIMEOUT) -> str:
-    """GET ``url`` with retries, returning the body text. Raises on persistent failure."""
+    """GET ``url`` with retries, returning the body text. Raises on persistent failure.
+
+    Backoff is capped so a rate-limited proxy (r.jina.ai's free tier) gets time to
+    recover without making the whole run drag.
+    """
     status = 0
     for attempt in range(retries):
         status, body = _curl_once(url, headers, timeout)
         if status == 200 and body:
             return body
         if attempt < retries - 1:
-            time.sleep(2.0 * (attempt + 1))
+            time.sleep(min(2.0 * (attempt + 1), 8.0))
     raise RuntimeError(f"could not fetch {url} (last status {status})")
 
 
@@ -216,13 +220,29 @@ def scrape_skroutz() -> dict:
 # -------------------------------------------------------------------------
 # amazon.de
 # -------------------------------------------------------------------------
+AMAZON_PRICE_TRIES = 5
+
+
 def _amazon_fetch() -> str:
-    # ScraperAPI's mobile render inlines the price: amazon's desktop page loads it
-    # via a client-side prefetch (absent from the fetched HTML), but the mobile
-    # page is server-rendered with both the featured buy-box price and the
-    # cheapest "X Optionen von …" buying-options price. country_code=de lands on a
-    # German IP so amazon quotes the native EUR price.
-    return _scraperapi_get(AMAZON_URL, country_code="de", device_type="mobile")
+    # ScraperAPI's mobile page is server-rendered with the price inline (the
+    # desktop page loads it via a client-side prefetch that's absent from the
+    # fetched HTML). country_code=de lands on a German IP for the native EUR
+    # price. ScraperAPI rotates proxies, so ~1 in 5 fetches lands on an amazon
+    # variant without the price block — retry until a price is present.
+    last = ""
+    for _ in range(AMAZON_PRICE_TRIES):
+        last = _scraperapi_get(AMAZON_URL, country_code="de", device_type="mobile")
+        if _has_amazon_price(last):
+            return last
+    return last
+
+
+def _has_amazon_price(html: str) -> bool:
+    try:
+        _amazon_price(html)
+        return True
+    except ValueError:
+        return False
 
 
 # Cheapest "buying options" price: <span>1 Option von </span> … <span class="a-offscreen">1.390,77€</span>
