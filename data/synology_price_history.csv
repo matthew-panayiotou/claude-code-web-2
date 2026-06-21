@@ -1,3 +1,7 @@
 scraped_at,site,product,url,condition,availability,currency,item_price,delivery_cost,total_price,exchange_rate_to_eur,rate_date,rate_source,eur_item_price,eur_delivery_cost,eur_total_price
 2026-06-20T21:08:55Z,skroutz.cy,Synology DVA1622,https://www.skroutz.cy/s/38408451,new,Ετοιμάζεται για αποστολή σε 6 ημέρες,EUR,1240.98,0.0,1240.98,1.0,2026-06-20,identity,1240.98,0.0,1240.98
 2026-06-20T21:08:55Z,amazon.de,Synology DVA1622,https://www.amazon.de/dp/B0B3ZS9RS7,new,Nur noch 3 auf Lager,EUR,961.82,0.0,961.82,1.0,2026-06-20,identity,961.82,0.0,961.82
+2026-06-21T04:17:36Z,skroutz.cy,Synology DVA1622,https://www.skroutz.cy/s/38408451,new,Ετοιμάζεται για αποστολή σε 6 ημέρες,EUR,1240.98,0.0,1240.98,1.0,2026-06-21,identity,1240.98,0.0,1240.98
+2026-06-21T04:36:04Z,skroutz.cy,Synology DVA1622,https://www.skroutz.cy/s/38408451,new,Ετοιμάζεται για αποστολή σε 6 ημέρες,EUR,1240.98,0.0,1240.98,1.0,2026-06-21,identity,1240.98,0.0,1240.98
+2026-06-21T04:41:08Z,skroutz.cy,Synology DVA1622,https://www.skroutz.cy/s/38408451,new,Ετοιμάζεται για αποστολή σε 6 ημέρες,EUR,1240.98,0.0,1240.98,1.0,2026-06-21,identity,1240.98,0.0,1240.98
+2026-06-21T04:41:08Z,amazon.de,Synology DVA1622,https://www.amazon.de/dp/B0B3ZS9RS7,new,via buying options,EUR,1390.77,0.0,1390.77,1.0,2026-06-21,identity,1390.77,0.0,1390.77

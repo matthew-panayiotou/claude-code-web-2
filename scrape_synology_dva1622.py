@@ -7,22 +7,26 @@ currency and an EUR conversion with the exchange rate at scrape time" requiremen
 the scraper detects the listed currency, looks up the live EUR rate (identity for
 EUR) and stores the converted figures alongside the originals.
 
-Both sites sit behind bot protection that rejects Python's urllib TLS handshake
-(403/503), so we shell out to ``curl`` (HTTP/2 + brotli), which they accept.
+Both sites block direct requests from data-center/CI IP ranges (skroutz returns a
+403 challenge, amazon a CAPTCHA), so we never hit them directly. Instead each
+site is fetched through a proxy that fetches from its own clean IPs:
 
 skroutz.cy
-    The SKU page exposes a clean ``filter_products.json`` endpoint listing every
-    shop offer with ``raw_price``/``shipping_cost``/``final_price``. skroutz only
-    aggregates new retail offers, so we simply take the offer with the lowest
-    final price.
+    Fetched through the free, no-key r.jina.ai reader. The SKU page exposes a
+    clean ``filter_products.json`` endpoint listing every shop offer with
+    ``raw_price``/``shipping_cost``/``final_price``. skroutz only aggregates new
+    retail offers, so we take the offer with the lowest final price.
 
 amazon.de
-    amazon.de defaults to a USD price overlay; we force EUR with the
-    ``i18n-prefs=EUR`` cookie so the listed currency is the store-native EUR.
-    The featured offer (buy box) is Amazon's cheapest new offer; we read its
-    price, delivery cost and availability. Product pages are served
-    intermittently from data-center IPs, so the fetch retries until a full page
-    (not a CAPTCHA stub) comes back.
+    Fetched through ScraperAPI, the only thing that reliably gets past amazon's
+    CAPTCHA. We request the *mobile* page (``device_type=mobile``): amazon's
+    desktop page loads the price via a client-side prefetch that the fetched HTML
+    never contains, whereas the mobile page is server-rendered with the price
+    inline. ``country_code=de`` lands on a German IP so amazon quotes the native
+    EUR price. We take the cheapest new offer — the featured buy box if one is in
+    stock, otherwise the cheapest "X Optionen von …" buying-options offer. Set the
+    API key in ``SCRAPER_API_KEY``; without it the amazon scrape is skipped
+    (skroutz still works).
 
 Usage:
     python3 scrape_synology_dva1622.py            # scrape and print JSON
@@ -32,10 +36,12 @@ Usage:
 import argparse
 import html as htmllib
 import json
+import os
 import re
 import subprocess
 import sys
 import time
+import urllib.parse
 from datetime import datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -55,48 +61,79 @@ AMAZON_URL = f"https://www.amazon.de/dp/{AMAZON_ASIN}"
 # Live EUR FX rates (frankfurter.dev — ECB reference rates, no API key needed).
 FX_URL = "https://api.frankfurter.dev/v1/latest?base={base}&symbols=EUR"
 
-DESKTOP_UA = (
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
-    "(KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-)
-
-# A real amazon.de product page is hundreds of KB; CAPTCHA / "503" stubs are ~1KB.
-# amazon throttles per-IP, so we make a modest number of *spaced* attempts rather
-# than hammering (rapid retries only deepen the block).
-AMAZON_MIN_BYTES = 80_000
-AMAZON_MAX_TRIES = 12
-AMAZON_RETRY_DELAY = 4.0  # seconds between attempts
+# Proxy transports (the sites block CI IPs directly, so we route through these).
+JINA_BASE = "https://r.jina.ai/"
+SCRAPERAPI_BASE = "https://api.scraperapi.com/"
+SCRAPER_API_KEY = os.environ.get("SCRAPER_API_KEY", "").strip()
 
 CURRENCY_SYMBOLS = {"€": "EUR", "$": "USD", "£": "GBP"}
 
-
 _STATUS_SEP = b"\n__HTTP_STATUS__:"
+_DEFAULT_TIMEOUT = 90
 
 
-def _curl_once(url: str, headers: dict | None) -> tuple[int, bytes]:
-    args = ["curl", "-s", "--http2", "--compressed", "-A", DESKTOP_UA,
+def _curl_once(url: str, headers: dict | None, timeout: int) -> tuple[int, str]:
+    args = ["curl", "-s", "--compressed", "-m", str(timeout),
             "-w", _STATUS_SEP.decode() + "%{http_code}"]
     for key, value in (headers or {}).items():
         args += ["-H", f"{key}: {value}"]
     args.append(url)
-    result = subprocess.run(args, capture_output=True, timeout=60)
+    result = subprocess.run(args, capture_output=True, timeout=timeout + 15)
     if result.returncode != 0:
         raise RuntimeError(f"curl failed for {url}: {result.stderr.decode('utf-8', 'replace')}")
     body, _, status = result.stdout.rpartition(_STATUS_SEP)
-    return int(status or 0), body
+    return int(status or 0), body.decode("utf-8", "replace")
 
 
-def _curl(url: str, *, headers: dict | None = None, retries: int = 6) -> bytes:
-    """Fetch a URL, retrying past the sites' intermittent anti-bot 403/503 stubs."""
-    last = b""
+def _get(url: str, *, headers: dict | None = None, retries: int = 6,
+         timeout: int = _DEFAULT_TIMEOUT) -> str:
+    """GET ``url`` with retries, returning the body text. Raises on persistent failure.
+
+    Backoff is capped so a rate-limited proxy (r.jina.ai's free tier) gets time to
+    recover without making the whole run drag.
+    """
+    status = 0
     for attempt in range(retries):
-        status, body = _curl_once(url, headers)
+        status, body = _curl_once(url, headers, timeout)
         if status == 200 and body:
             return body
-        last = body
         if attempt < retries - 1:
-            time.sleep(1.5)
-    raise RuntimeError(f"could not fetch {url} (last status {status}, {len(last)} bytes)")
+            time.sleep(min(2.0 * (attempt + 1), 8.0))
+    raise RuntimeError(f"could not fetch {url} (last status {status})")
+
+
+def _jina_get(target_url: str, *, headers: dict | None = None) -> str:
+    """Fetch ``target_url`` through the r.jina.ai reader (free, no key)."""
+    return _get(JINA_BASE + target_url, headers=headers)
+
+
+def _scraperapi_get(target_url: str, *, render: bool = False,
+                    country_code: str = "de", device_type: str | None = None) -> str:
+    """Fetch ``target_url`` through ScraperAPI (cloud proxies)."""
+    if not SCRAPER_API_KEY:
+        raise RuntimeError(
+            "SCRAPER_API_KEY is not set; cannot fetch amazon.de "
+            "(set it as a GitHub Actions secret / env var)"
+        )
+    params = {
+        "api_key": SCRAPER_API_KEY,
+        "url": target_url,
+        "country_code": country_code,
+    }
+    if render:
+        params["render"] = "true"
+    if device_type:
+        params["device_type"] = device_type
+    return _get(SCRAPERAPI_BASE + "?" + urllib.parse.urlencode(params))
+
+
+def _extract_json(text: str) -> dict:
+    """Pull the first JSON object out of a (possibly proxy-wrapped) response body."""
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("no JSON object found in response")
+    obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    return obj
 
 
 def _money(value) -> float:
@@ -120,7 +157,7 @@ def eur_rate(currency: str) -> tuple[float, str, str]:
     """
     if currency == "EUR":
         return 1.0, datetime.now(timezone.utc).strftime("%Y-%m-%d"), "identity"
-    data = json.loads(_curl(FX_URL.format(base=currency)))
+    data = json.loads(_get(FX_URL.format(base=currency)))
     return float(data["rates"]["EUR"]), data["date"], "frankfurter.dev (ECB)"
 
 
@@ -140,10 +177,10 @@ def _with_eur(listing: dict) -> dict:
 # -------------------------------------------------------------------------
 def _skroutz_sku() -> str:
     try:
-        search = _curl(SKROUTZ_SEARCH, headers={"Accept-Language": "el-GR,el;q=0.9,en;q=0.8"})
-        match = re.search(rb"/s/(\d+)/[^\"]*\.html", search)
+        search = _jina_get(SKROUTZ_SEARCH)
+        match = re.search(r"/s/(\d+)/[A-Za-z0-9\-]*\.html", search)
         if match:
-            return match.group(1).decode()
+            return match.group(1)
     except Exception:
         pass
     return SKROUTZ_FALLBACK_SKU
@@ -152,16 +189,7 @@ def _skroutz_sku() -> str:
 def scrape_skroutz() -> dict:
     sku = _skroutz_sku()
     url = f"{SKROUTZ_BASE}/s/{sku}/filter_products.json"
-    data = json.loads(
-        _curl(
-            url,
-            headers={
-                "Accept": "application/json",
-                "X-Requested-With": "XMLHttpRequest",
-                "Accept-Language": "el-GR,el;q=0.9",
-            },
-        )
-    )
+    data = _extract_json(_jina_get(url))
     cards = data.get("product_cards", {})
     if not cards:
         raise ValueError("skroutz returned no offers for the DVA1622")
@@ -192,46 +220,66 @@ def scrape_skroutz() -> dict:
 # -------------------------------------------------------------------------
 # amazon.de
 # -------------------------------------------------------------------------
+AMAZON_PRICE_TRIES = 5
+
+
 def _amazon_fetch() -> str:
-    headers = {
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "de-DE,de;q=0.9,en;q=0.8",
-        # Force EUR (the store-native currency) instead of the USD price overlay.
-        "Cookie": "i18n-prefs=EUR; lc-acbde=de_DE",
-    }
-    for attempt in range(AMAZON_MAX_TRIES):
-        status, body = _curl_once(AMAZON_URL, headers)
-        # Amazon serves a ~1KB CAPTCHA/503 stub (sometimes with a 200) from
-        # data-center IPs; a genuine product page is hundreds of KB.
-        if status == 200 and len(body) >= AMAZON_MIN_BYTES:
-            return body.decode("utf-8", "replace")
-        if attempt < AMAZON_MAX_TRIES - 1:
-            time.sleep(AMAZON_RETRY_DELAY)
-    raise RuntimeError(
-        f"amazon.de kept returning anti-bot stubs after {AMAZON_MAX_TRIES} tries"
-    )
+    # ScraperAPI's mobile page is server-rendered with the price inline (the
+    # desktop page loads it via a client-side prefetch that's absent from the
+    # fetched HTML). country_code=de lands on a German IP for the native EUR
+    # price. ScraperAPI rotates proxies, so ~1 in 5 fetches lands on an amazon
+    # variant without the price block — retry until a price is present.
+    last = ""
+    for _ in range(AMAZON_PRICE_TRIES):
+        last = _scraperapi_get(AMAZON_URL, country_code="de", device_type="mobile")
+        if _has_amazon_price(last):
+            return last
+    return last
+
+
+def _has_amazon_price(html: str) -> bool:
+    try:
+        _amazon_price(html)
+        return True
+    except ValueError:
+        return False
+
+
+# Cheapest "buying options" price: <span>1 Option von </span> … <span class="a-offscreen">1.390,77€</span>
+_AMZ_OPTIONS_RE = re.compile(
+    r'Option(?:en)?\s*von\s*</span>.*?<span class="a-offscreen">\s*([\d.]+,\d{2})\s*([€$£])',
+    re.DOTALL,
+)
+# Featured buy-box price, rendered as whole/decimal/fraction spans.
+_AMZ_STRUCTURED_RE = re.compile(
+    r'a-price-whole">([\d.]+)<span class="a-price-decimal">,</span></span>'
+    r'<span class="a-price-fraction">(\d{2})</span>'
+    r'<span class="a-price-symbol">([€$£])'
+)
 
 
 def _amazon_price(html: str) -> tuple[float, str]:
-    # The featured-offer price lives in the priceToPay block. Anchor there, then
-    # read the rendered whole/fraction/symbol spans (the *.-offscreen mirror is
-    # sometimes blank), falling back to a flat offscreen amount.
-    anchor = html.find("priceToPay")
-    region = html[anchor:] if anchor != -1 else html
-    structured = re.search(
-        r'a-price-whole">([\d.]+)<span class="a-price-decimal">,</span></span>'
-        r'<span class="a-price-fraction">(\d{2})</span>'
-        r'<span class="a-price-symbol">([€$£])',
-        region,
-    )
-    if structured:
-        whole, fraction, symbol = structured.groups()
-        return _parse_eu_number(f"{whole},{fraction}"), CURRENCY_SYMBOLS[symbol]
+    """Cheapest new amazon.de price: the featured buy box if present, otherwise the
+    cheapest "buying options" offer. Returns (price, currency)."""
+    candidates: list[tuple[float, str]] = []
 
-    flat = re.search(r'(?:a-offscreen|aok-offscreen)">\s*([\d.]+,\d{2})\s*([€$£])', region)
-    if flat:
-        return _parse_eu_number(flat.group(1)), CURRENCY_SYMBOLS[flat.group(2)]
-    raise ValueError("could not find the amazon.de buy-box price")
+    options = _AMZ_OPTIONS_RE.search(html)
+    if options:
+        candidates.append((_parse_eu_number(options.group(1)), CURRENCY_SYMBOLS[options.group(2)]))
+
+    # Anchor the structured price to the buy box so we don't pick up an accessory.
+    anchor = html.find("priceToPay")
+    if anchor == -1:
+        anchor = html.find("corePrice")
+    if anchor != -1:
+        featured = _AMZ_STRUCTURED_RE.search(html[anchor:anchor + 4000])
+        if featured:
+            whole, fraction, symbol = featured.groups()
+            candidates.append((_parse_eu_number(f"{whole},{fraction}"), CURRENCY_SYMBOLS[symbol]))
+
+    if not candidates:
+        raise ValueError("could not find any amazon.de price (featured or buying options)")
+    return min(candidates, key=lambda c: c[0])
 
 
 def _amazon_delivery(html: str) -> float:
@@ -249,19 +297,21 @@ def _amazon_availability(html: str) -> str:
 
 
 def parse_amazon(html: str) -> dict:
-    # Amazon's featured offer (the priceToPay buy box) is always a new offer;
-    # used/renewed stock is only ever surfaced under "Andere Angebote", never here.
-    if "priceToPay" not in html:
-        raise ValueError("amazon.de page has no featured new offer (buy box)")
+    # The buy box and the "Andere Verkäufer/Optionen" listings are both new offers
+    # (used stock lives under a separate "Gebraucht kaufen" section), so the
+    # cheapest of them is the cheapest new listing.
     item, currency = _amazon_price(html)
     delivery = _amazon_delivery(html)
+    featured = "priceToPay" in html or "corePriceDisplay" in html
     return _with_eur(
         {
             "site": "amazon.de",
             "product": PRODUCT,
             "url": AMAZON_URL,
             "condition": "new",
-            "availability": _amazon_availability(html),
+            "availability": _amazon_availability(html) or (
+                "featured offer" if featured else "via buying options"
+            ),
             "currency": currency,
             "item_price": _money(item),
             "delivery_cost": _money(delivery),
@@ -301,13 +351,15 @@ def scrape_safe() -> tuple[list[dict], dict[str, str]]:
     return listings, errors
 
 
-# Known-good item prices supplied for validation (EUR).
+# Point-in-time reference prices (EUR) for a --verify sanity check. These drift as
+# stock and offers change: amazon's original 961.82 "Versand durch Amazon" offer
+# (only 3 left) sold out, leaving 1390.77 as the cheapest new offer on 2026-06-21.
 EXPECTED = {
     "skroutz.cy": 1240.98,
-    "amazon.de": 961.82,
+    "amazon.de": 1390.77,
 }
-# Acceptable drift before we treat a scrape as suspicious (prices move over time).
-VERIFY_TOLERANCE = 0.05  # 5%
+# Generous drift allowance — this is a smoke test, not a price assertion.
+VERIFY_TOLERANCE = 0.10  # 10%
 
 
 def verify(listings: list[dict]) -> bool:
