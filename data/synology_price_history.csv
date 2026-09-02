@@ -295,3 +295,5 @@ scraped_at,site,product,url,condition,availability,currency,item_price,delivery_
 2026-09-01T17:20:15Z,amazon.de,Synology DVA1622,https://www.amazon.de/dp/B0B3ZS9RS7,new,Nur noch 19 auf Lager,EUR,828.38,0.0,828.38,1.0,2026-09-01,identity,828.38,0.0,828.38
 2026-09-02T05:49:13Z,skroutz.cy,Synology DVA1622,https://www.skroutz.cy/s/38408451,new,Ετοιμάζεται για αποστολή σε 6 ημέρες,EUR,1461.74,0.0,1461.74,1.0,2026-09-02,identity,1461.74,0.0,1461.74
 2026-09-02T05:49:13Z,amazon.de,Synology DVA1622,https://www.amazon.de/dp/B0B3ZS9RS7,new,Nur noch 17 auf Lager,EUR,828.38,0.0,828.38,1.0,2026-09-02,identity,828.38,0.0,828.38
+2026-09-02T17:09:46Z,skroutz.cy,Synology DVA1622,https://www.skroutz.cy/s/38408451,new,Ετοιμάζεται για αποστολή σε 6 ημέρες,EUR,1234.06,0.0,1234.06,1.0,2026-09-02,identity,1234.06,0.0,1234.06
+2026-09-02T17:09:46Z,amazon.de,Synology DVA1622,https://www.amazon.de/dp/B0B3ZS9RS7,new,Nur noch 17 auf Lager,EUR,828.48,0.0,828.48,1.0,2026-09-02,identity,828.48,0.0,828.48
